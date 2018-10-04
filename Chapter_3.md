@@ -280,4 +280,489 @@ my_string:
 
 ### 使用栈
 
-当面临底层计算的时候，我们经常听到很多人会讨论栈，好像这个东西很特殊一样。栈其实只是为了解决下面这个不便：CPU 只有有限的寄存器用于暂时的变量存储，但我们经常需要更多
+当面临底层计算的时候，我们经常听到很多人会讨论栈，好像这个东西很特殊一样。栈其实只是为了解决下面这个不便：CPU 只有有限的寄存器用于暂时的变量存储，但我们经常需要比寄存器数量更多的临时存储。我们当然可以使用内存，不过通过内存地址读写是不方便的，尤其当我们不在乎数据被存放的真实地方。不久我们很看到，在函数调用中的参数传递中是非常有用的。
+
+CPU 提供两个指令，允许我们存取栈顶的数据：`push` 和 `pop`，并不需要关系它们实际被存放的地方。但是注意在16位模式下，我们不能 push 或者 pop 一个字节数据，我们此时只能以16位为单元存取。
+
+栈是通过两个特殊的 CPU 寄存器实现的：`bp` 和 `sp`，分别存放栈底和栈顶的地址。因为我们经常 push 数据到栈中，通常栈底十分远离内存其他区域（比如 BIOS 代码和我们的代码），这样当栈变得很大的时候，复写的可能就比较底了。一个迷惑的事实是，当 push 的时候，栈是相对于 bp 向低地址增长的。所以对于 `bp`，`sp` 等于它减去值的大小。
+
+下面的启动代码展示了栈的使用
+
+问题2:
+
+下面的启动代码将会以什么顺序打印？ 'C' 这个字符会存放在哪个绝对内存地址？你可以改代码来验证你的想法，不过一定要解释为什么是这样。
+
+```
+;
+; A simple boot sector program that demonstrates the stack. 
+;
+
+mov ah, 0x0e        ; int 10/ah = 0eh -> scrolling teletype BIOS routine
+
+mov bp, 0x8000      ; Set the base of the stack a little above where BIOS 
+mov sp, bp          ; loads our boot sector - so it won’t overwrite us.
+
+push ’A’            ; Push some characters on the stack for later 
+push ’B’            ; retreival. Note, these are pushed on as
+push ’C’            ; 16-bit values, so the most significant byte
+                    ; will be added by our assembler as 0x00.
+
+pop bx              ; Note, we can only pop 16-bits, so pop to bx 
+mov al, bl          ; then copy bl (i.e. 8-bit char) to al
+int 0x10            ; print(al)
+
+pop bx              ; Pop the next value 
+mov al, bl 
+int 0x10            ; print(al)
+
+mov al, [0x7ffe]    ; To prove our stack grows downwards from bp,
+                    ; fetch the char at 0x8000 - 0x2 (i.e. 16-bits) 
+int 0x10            ; print(al)
+
+jmp $               ; Jump forever. 
+
+; Padding and magic BIOS number.
+times 510-($-$$) db 0 
+dw 0xaa55
+```
+
+### 控制结构
+
+如果我们不知道如何写基本的控制代码，比如 `if..then..elseif..else`， `for` 和 `while`，我们会无所适从的！这些语句允许可选的执行分支。
+
+这些高层的控制语句最终会被转换成 jump 语句。事实上，我们前面已经看过最简单的代码了：
+
+```
+some_label:
+  jmp some_label ; jump to address of label
+```
+
+或者上述的等价的代码：
+
+```
+jmp $ ; jump to address of current instruction
+```
+
+这个指令提供了一个无条件转移功能（它总是 jump），不过我们更希望根据某个条件跳转（比如不断循环直到循环十次等等）。
+
+在汇编语言中实现条件跳转是这样的：首先执行一个比较指令，然后执行一个特殊的条件转移指令
+
+```
+cmp ax, 4     ; compare the value in ax to 4
+je then_block ; jump to then_block if they were equal 
+mov bx , 45   ; otherwise , execute this code
+jmp the_end   ; important: jump over the ’then’ block,
+              ; so we don’t also execute that code.
+then_block: 
+  mov bx , 23
+the_end:
+```
+
+在 C 或者 Java 语言中，看起来像这样：
+
+```
+if(ax == 4) { 
+  bx = 23;
+} else { 
+  bx = 45;
+}
+```
+
+我们可以从上面的汇编代码中看到，在幕后，`cmp` 和 `je` 指令应该有一定关系在。事实是，CPU 有一个 `flags` 寄存器用于存放 `cmp` 指令的结果，然后随后的条件跳转指令可以决定是否跳转到相应的地址。
+
+基于 `cmp x, y` 指令的结果，有下列跳转指令可用：
+
+```
+je target   ; jump if equal                 (i.e. x == y)
+jne target  ; jump if not equal             (i.e. x != y)
+jl target   ; jump if less than             (i.e. x < y)
+jle target  ; jump if less than or equal    (i.e. x <= y)
+jg target   ; jump if greater than          (i.e. x > y)
+jge target  ; jump if greater than or equal (i.e. x >= y)
+```
+
+问题3：
+
+从高层语言的角度规划跳转代码，然后用汇编语言替换会很有用。试一下转换下列的伪汇编代码为真实的汇编代码，使用 `cmp` 和相关的跳转指令。用不同的 `bx` 值测试。并给每行代码添加注释。
+
+```
+mov bx , 30
+if (bx <= 4) {
+  mov al, ’A’
+} else if (bx < 40) { 
+  mov al, ’B’
+} else {
+  mov al, ’C’
+}
+
+mov ah, 0x0e      ; int=10/ah=0x0e -> BIOS tele-type output 
+int 0x10          ; print the character in al
+
+jmp $
+
+; Padding and magic number. 
+times 510-($-$$) db 0
+dw 0xaa55
+```
+
+### 调用函数
+
+在高层语言中，我们会将一个大问题写成一个通用目的函数（比如打印信息，写文件等等），然后我们会在代码中不断的使用它，一般是通过改变传递给函数的参数来获取不同的输出。从 CPU 角度，函数就是跳转到某个有用的例程的地址处，然后再跳转回到跳转之前的下一条指令。
+
+我们可以模拟一个函数的调用像这样：
+
+```
+...
+...
+mov al, ’H’ ; Store ’H’ in al so our function will print it.
+
+jmp my_print_function
+return_to_here:       ; This label is our life-line so we can get back.
+...
+...
+
+my_print_function:
+  mov ah, 0x0e          ; int=10/ah=0x0e -> BIOS tele-type output 
+  int 0x10              ; print the character in al
+  jmp return_to_here    ; return from the function call.
+```
+
+首先，注意我们是如何使用 `al` 作为参数的，预先为相应的函数设置它。这就是高层语言中参数转递的实现的基础，同时调用方和被调用者必须要对参数个数和参数存放地址达成一致。
+
+不幸的是，上面这种方式我们需要明确的告诉它当结束的时候要返回到哪里，这样的话，就不能从任意的地方调用这个函数了（它总是返回到同样的地址，在这里就是 `return_to_here`）。
+
+从参数传递的方式借鉴一下，调用者代码可用存放一个准确的返回地址（比如，调用之后的那行代码）在某个公认的地方。然后被调用者可以跳转回那个地址。 CPU 会用 `ip`（instruction pointer） 寄存器追踪现在正在被执行的指令的地址。不过，很不幸，我们不能直接访问它。不过 CPU 提供了一对指令 `call` 和 `ret`，它们的工作方式正是我们想要的：`call` 的行为像 `jmp`，不过在跳转之前，它会把返回地址 push 到栈中。`ret` 会 从栈上 pop 返回地址，然后跳转到那，像下面这样：
+
+```
+...
+...
+mov al, ’H’   ; Store ’H’ in al so our function will print it. 
+call my_print_function
+...
+...
+
+my_print_function: 
+  mov ah, 0x0e  ; int=10/ah=0x0e -> BIOS tele-type output
+  int 0x10      ; print the character in al
+  ret
+```
+
+我们的函数基本上很完美了，不过有一个很丑陋的问题，尽早的认识到会很有帮助。当我们在汇编代码中调用一个函数的时候，比如一个打印函数，这个函数的内部很可能会用几个寄存器去帮助它的执行的实现（事实上，由于寄存器资源稀有，它几乎一定会这样做的），所以当我们的代码从函数调用返回的时候，我们之前存放在 `dx` 中的值很可能已经不在了。
+
+一个明智的守规矩的函数会立刻将任何它想要使用的寄存器的内容 push 到栈中，然后在它要返回的时候马上 pop（重新恢复寄存器在调用之前的值） 它们。因为一个函数很可能会使用许多通用寄存器，CPU 实现了两个方便的指令，`pusha` 和 `popa`，这对指令会向栈中 push 和 pop 所有寄存器的内容。比如：
+
+```
+some_function:
+  pusha         ; Push all register values to the stack
+  mov bx, 10 
+  add bx, 20 
+  mov ah, 0x0e  ; int=10/ah=0x0e -> BIOS tele-type output 
+  int 0x10      ; print the character in al
+  popa          ; Restore original register values
+  ret
+```
+
+### 包含文件
+
+有时候，你可能会想在多个程序中复用你的代码。 `nasm` 运行你包含外部文件：
+
+```
+%include "my_print_function.asm"  ; this will simply get replaced by 
+                                  ; the contents of the file
+...
+mov al, ’H’                       ; Store ’H’ in al so our function will print it. 
+call my_print_function
+```
+
+### 小结
+
+我们已经了解了一下 CPU 和汇编相关的知识，现在可用开始编写一个稍微复杂有点的 “Hello, word” 启动程序了。
+
+问题4:
+
+将这一节学到的内容利用起来，来写一个函数打印以0结尾的字符串，这个函数可以用如下的方式使用：
+
+```
+;
+; A boot sector that prints a string using our function.
+;
+[org 0x7c00] ; Tell the assembler where this code will be loaded
+
+mov bx, HELLO_MSG       ; Use BX as a parameter to our function, so
+call print_string       ; we can specify the address of a string.
+
+mov bx, GOODBYE_MSG 
+call print_string
+jmp $
+
+%include "print_string.asm"
+
+; Data
+HELLO_MSG:
+  db ’Hello, World!’, 0   ; <-- The zero on the end tells our routine
+                        ; when to stop printing characters.
+
+GOODBYE_MSG:
+  db ’Goodbye!’, 0
+
+; Padding and magic number. 
+  times 510-($-$$) db 0
+  dw 0xaa55
+```
+
+为了好的分数，请注意函数要小心处理寄存器，并且最好每行代码都有相应的注释来阐述你的理解。
+
+
+### 总结
+
+我们好像仍然没有什么很大的进展。不过，因为我们要工作的环境比较特殊，所以这还好，也很正常。如果你到现在为止的理解的话，我们的进展就很顺利。
+
+## 护士，帮帮我！！
+
+目前，我们已经成功的让计算机打印我们加载到内存中的字符和字符串，很快，我们会试着从磁盘加载数据。如果我们能够展示存储在任意内存地址处的16进制的格式的数据的话，这对我们实际想要加载的东西很有帮助。记住，我们没有奢侈的好用的开发环境，也没有调试器帮助我们一行行调试观察代码。当我们犯错的时候，计算机给我们唯一的最好的反馈是什么也没有发生，所以我们要仔细。
+
+我们已经完成了一个例程来打印字符串。现在我们要拓展那个想法，一个打印16进制格式的例程，这对于我们在底层环境工作会很有用。
+
+我们仔细想想要怎么做，首先思考一下我们会怎样用这个例程呢？在高级语言中，我们可能会像这样：`print_hex(0x1fb6)`，这个会打印`0x1fb6`。在前面的章节中，我们已经看到，汇编是如何调用函数，以及我们如果用寄存器作为参数。现在让我们用 `dx` 作为存储我们 print_hex 函数参数的地方：
+
+```
+mov dx, 0x1fb6 ; store the value to print in dx 
+call print_hex ; call the function
+
+; prints the value of DX as hex.
+print_hex:
+...
+...
+ret
+```
+
+既然我们想要屏幕上打印字符串，我们可能可以复用我们之前的打印函数去做真正的打印工作，所以我们主要的工作是如何转换在 `dx` 中的字符串参数。在汇编中，我们肯定不想引入太多不比较的东西，所以让我们以下列的想法开始我们的函数。首先，我们定义完整的16进制字符串为代码中的模版变量，就像我们之前定义 “Hello, World” 一样，然后我们可以让打印函数打印它。 `print_hex` 例程的主要任务是将模版字符串中的每一个组成部分转换成16进制的 ASCII 码值。
+
+```
+mov dx, 0x1fb6 ; store the value to print in dx 
+call print_hex ; call the function
+
+; prints the value of DX as hex.
+print_hex:
+; TODO: manipulate chars at HEX_OUT to reflect DX
+
+mov bx, HEX_OUT     ; print the string pointed to 
+call print_string   ; by BX
+ret
+
+; global variables 
+HEX_OUT: db ’0x0000’,0
+```
+
+### 问题5
+
+实现 `print_hex` 函数，你可能会发现 CPU 指令 `and` 和 `shr` 很有用，你可以网上搜索找到相关资料。确保给每行代码添加注释。
+
+## 读取磁盘
+
+我们已经介绍了 BIOS，以及尝试了一下计算机底层的开发，但是有个小问题挡在我们开发 OS 的路上：BIOS从磁盘的第一个扇区加载我们的启动代码，但这几乎是它能加载的所有了。如果我们的 OS 代码很庞大怎么办？比如说大于 512 字节？
+
+OS 通常不会是一个 512 字节大小的。所以，第一件要做的事就是，将它们剩余的代码从磁盘引导到内存中，然后开始执行。幸运的是，就像之前提示的一样，BIOS 提供了一些例程允许我们管理在磁盘上的数据。
+
+### 基于段的扩展内存
+
+当 CPU 运行在16位真实环境中时，寄存器最大的大小是16位，这意味着，我们能引用的最大的内存地址是 `0xfff`，以现在的标准就是说大约 64KB （65536 字节），我们将要完成的 OS 不太可能会超过这个限制，不过这么小的一个空间，现代的 OS 可能就不太舒服了。所以了解这个问题的解决方案很重要：段切割
+
+为了绕过这个限制，CPU 设计者添加了一些特殊的寄存器，`cs`、`ds`、`ss` 和 `es`，这些被叫做段寄存器。我们可以想象内存被划分为好几段，并通过这些段寄存器被索引。这样子，当我们指定一个16位地址，CPU 会通过合适的段开始地址加上我们指定的偏移地址自动计算绝对地址。比如：`mov ax, [0x45ef]` 中使用的地址默认情况下会根据数据寄存器发生偏移也就是 `ds` （data segment）。同样的栈的段寄存器 `ss` 用于计算栈底指针 `bp` 的绝对地址。
+
+关于段地址最恼人的一件事是：相邻的段总是会发生16字节的重叠，所以不同的段和偏移计算出来的绝对地址有时候会一样。但是，在遇到这个问题之前，我们暂时了解到这里。
+
+为了计算绝对地址，CPU 会将段寄存器中的值乘以16，然后加上你提供的偏移地址。因为我们用的是16进制，当将一个数乘16时，我们只需要简单的将两个0添加到左边（原文有误，说一个0，应该是两个0），比如 0x42 * 16 = 0x4200.所以如果我们设置 `ds` 为 `0x4d` 然后执行 `mov ax, [0x20]`，ax 中的结果将会是地址 `0x4d20` 的内容（16 * 0x4d + 0x20）。
+
+下面展示了一个等价于我们使用 `[org 0x7c00]` 指令的代码，我们通过设置 `ds` 来完成类似的标签地址纠正。
+
+```
+;
+; A simple boot sector program that demonstrates segment offsetting 
+;
+
+mov ah, 0x0e        ; int 10/ah = 0eh -> scrolling teletype BIOS routine
+
+mov al, [the_secret]
+int 0x10            ; Does this print an X?
+
+mov bx, 0x7c0       ; Can ’t set ds directly , so set bx
+mov ds, bx          ;then copy bx to ds.
+mov al, [the_secret] 
+int 0x10            ; Does this print an X?
+
+mov al, [es:the_secret] ; Tell the CPU to use the es (not ds) segment.
+int 0x10                ; Does this print an X?
+
+mov bx, 0x7c0
+mov es, bx
+mov al, [es:the_secret]
+int 0x10                ; Does this print an X?
+
+jmp $                   ; Jump forever.
+
+the_secret:
+  db "X"
+
+; Padding and magic BIOS number. 
+
+times 510-($-$$) db 0
+dw 0xaa55
+```
+
+由于这里我们没有时候 `org` 指令，当我们通过 BIOS 加载到地址 `0x7c00` 时，汇编器不会帮我们偏移标签到正确的内存地址。所以第一次尝试打印 'X' 失败了。然而，如果我们设置数据段寄存器为 `0x7c`（原文有误，为 0x7c0 应该是 0x7c），CPU 会帮我们做这个偏移计算（比如 0x7c * 16 + the_secret），所以第二次尝试成功的打印了 ‘X’。在第三四次尝试中，我们做法一样，结果也是成功的，不过我们没有使用 段寄存器，而是使用通用的目的段寄存器 `es`。
+
+注意至少在16位模式下，CPU 的一个限制，一个看起对的指令 `mov ds, 0x1234` 并不会被成功执行：我们能往通用目的寄存器中用字面量存值，并不意味着我们可以对每种类型的寄存器都这样做，比如说段寄存器就不行。必须多一步先将数据存到通用目的寄存器中。
+
+所以，基于段的地址允许我们访问到更多的内存，大于1MB（0xffff * 16 + 0xffff）。后面当我们转到32位保护模式时，我们会了解到如何访问更多的内存。目前对于16位模式，了解这些已经够了。
+
+### 磁盘驱动工作方式
+
+硬盘驱动包含一个或多个堆叠起来的盘，盘下面有个读写头，就像老式播放器，（为了增加容量，所以将几个盘堆叠起来）访问磁头会从某个特定的盘的表面经过。因为某个特定的盘可以在它两个表面都被读写，一个读写磁头会有一个在盘上面，一个在盘下面。下图展示了经典的硬盘驱动的内部结构，并展示了堆叠的磁盘和暴露出来的磁头。
+
+![硬盘内部结构](img/ch3/2.png)
+
+注意这里的描述的内容在软磁盘上也一样适用，不过没有堆叠的磁盘，只有一个磁盘。
+
+金属外表的磁盘使得它们表面的特定区域可以被磁头磁化，或反磁化，所以能够有效的永久存储任何状态。因此如何描述将要被读写的数据在磁盘表面的精确地址很重要。目前使用 CHS （Cylinder-Head-Sector）来表示磁盘的数据地址。这是一个有效的 3D 坐标系统：
+
+- Cylinder（柱体）：柱体描述了与磁头不相关的相对于磁盘的外边缘的距离，也是因此得名的。当多个磁盘堆叠在一起时，你可以想象，在每个磁盘上的所有的磁头定义了一个柱体。
+- Head（头）：头描述了哪个 track （即某个特定磁盘的表面） 是我们关心的。
+- Sector：每一个 track 被划分成了几个扇区，通常是 512 字节大小，可以通过扇区索引来引用。
+
+如下图所示：
+
+![硬盘内部结构](img/ch3/3.png)
+
+
+### 使用 BIOS 读取磁盘
+
+不久我们会知道，不同的设备需要使用不同的例程。比如，软盘在使用之前我们需要手动为磁盘下的读写磁头开启关闭发动装置。大部分的硬盘设备有很多实用的自动化本地芯片，不过设备是如何连接 CPU 的总线技术（比如 ATA/IDE，SATA，SCSI，USB 等）影响了我们如何使用它们。幸运的是，BIOS 提供了几种磁盘例程将所有这些不同抽象化为一般的磁盘设备。
+
+我们想要使用的这个 BIOS 例程就是通过 `0x13` 引发的中断（预先设置 `al` 为 0x02）。这个例程要求我们设置几个寄存器，告诉它要使用哪个磁盘的哪一块，并且要读到内存的哪里。使用这个例程最难的地方是我们必须使用 CHS 地址模式指定第一个被读的块。如下代码所示：
+
+```
+mov ah, 0x02  ; BIOS read sector function
+mov dl, 0     ; Read drive 0 (i.e. first floppy drive)
+mov ch, 3     ; Select cylinder 3
+mov dh, 1     ; Select the track on 2nd side of floppy
+              ; disk, since this count has a base of 0
+mov cl, 4     ; Select the 4th sector on the track - not
+              ; the 5th, since this has a base of 1.
+mov al, 5     ; Read 5 sectors from the start point
+
+; Lastly, set the address that we'd like BIOS to read the
+; sectors to, which BIOS expects to find in ES:BX
+; (i.e. segment ES with offset BX).
+
+mov bx, 0xa000    ; Indirectly set ES
+mov es, bx
+mov bx, 0x1234    ; Set BX to 0x1234
+
+; In our case, data will be read to 0xa000:0x1234, which the
+; CPU will translate to physical address 0xa1234
+
+int 0x13          ; Now issue the BIOS interrupt to do the actual read.
+```
+
+注意，出于某种原因（比如，我们索引一个扇区但是没有考虑磁盘的限制，尝试读一个不存在的扇区，软盘没有被考虑在内），BIOS 可能会读取磁盘失败，所以知道如何检测这种情况很重要，不然，我们可能觉得我们已经读了一些数据，但事实上，目的地址的内存仍然包含的是一些随机的字节数据。幸运的是，BIOS 会更新某些寄存器让我们知道这些失败的情况：`falgs` 寄存器的 `CF` （carry flag）值表示一个通用的错误，同时，`al` 被设置为实际读取的扇区数量。在触发 BIOS 的磁盘读取中断之后，我们可以执行一个简单的测试：
+
+```
+...
+...
+int 0x13        ; Issue the BIOS interrupt to do the actual read.
+jc disk_error   ; jc is another jumping instruction, that jumps 
+                ; only if the carry flag was set.
+
+; This jumps if what BIOS reported as the number of sectors
+; actually read in AL is not equal to the number we expected.
+cmp al, <no. sectors expected >
+jne disk_error
+
+disk_error :
+  mov bx, DISK_ERROR_MSG 
+  call print_string
+  jmp $
+
+; Global variables
+  DISK_ERROR_MSG: db "Disk read error!", 0
+```
+
+### 小结
+
+像早前解释的，能够从磁盘读取很多字节对于启动我们的 OS 是很重要的。所以这里，我们使用这一节学到的内容来实现了一个有用的例程，这个例程的作用是从磁盘简单的读取紧随启动代码之后的前面n个扇区内容：
+
+```
+; load DH sectors to ES:BX from drive DL
+disk_load:
+  push dx     ; Store DX on stack so later we can recall
+              ; how many sectors were request to be read,
+              ; even if it is altered in the meantime
+
+  mov ah, 0x02  ; BIOS read sector function
+  mov al, dh    ; Read DH sectors
+  mov ch, 0x00  ; Select cylinder 0
+  mov dh, 0x00  ; Select head 0
+  mov cl, 0x02  ; Start reading from second sector (i.e. after the boot sector)
+  int 0x13      ; BIOS interrupt
+
+  jc disk_error ; Jump if error (i.e. carry flag set)
+
+  pop dx        ; Restore dx from the stack
+  cmp dh, al    ; if AL (sector read) != DH (sectors expected)
+  jne disk_error  ; display error message
+
+disk_error :
+  mov bx, DISK_ERROR_MSG 
+  call print_string
+  jmp $
+
+; Variables
+DISK_ERROR_MSG db "Disk read error!", 0
+```
+
+我们可以写一个启动代码测试上述代码：
+
+```
+; Read some sectors from the boot disk using our disk_read function
+[org 0x7c00]
+
+mov [BOOT_DRIVE], dl      ; BIOS stores our boot drive in DL, so it’s
+                          ; best to remember this for later.
+
+mov bp, 0x8000            ; Here we set our stack safely out of the 
+mov sp, bp                ; way, at 0x8000
+
+mov bx, 0x9000            ; Load 5 sectors to 0x0000(ES):0x9000(BX)
+mov dh, 5                 ; from the boot disk.
+mov dl, [BOOT_DRIVE] 
+call disk_load
+
+mov dx, [0x9000]          ; Print out the first loaded word, which
+call print_hex            ; we expect to be 0xdada , stored
+                          ; we expect to be 0xdada , stored
+
+mov dx , [0 x9000 + 512   ; Also, print the first word from the
+call print_hex            ; 2nd loaded sector: should be 0xface
+
+jmp $
+
+%include "../print/print_string.asm"  ; Re-use our print_string function
+%include "../hex/print_hex.asm"       ; Re-use our print_hex function
+%include "disk_load.asm"
+; Include our new disk_load function
+
+; Global variables 
+BOOT_DRIVE: db 0
+; Bootsector padding 
+times 510-($-$$) db 0 
+dw 0xaa55
+
+; We know that BIOS will load only the first 512-byte sector from the disk, 
+; so if we purposely add a few more sectors to our code by repeating some
+; familiar numbers, we can prove to ourselfs that we actually loaded those 
+; additional two sectors from the disk we booted from.
+
+times 256 dw 0xdada 
+times 256 dw 0xface
+```
