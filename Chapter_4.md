@@ -234,4 +234,103 @@ mov cr0, eax  ; Update the control register
 jmp <segment>:<address offset>
 ```
 
-对于这条指令，我们要仔细思考我们想要跳到哪里。
+对于这条指令，我们要仔细思考我们想要跳到哪里。假设我们已经在代码中设置了一个标签比如说是 `start_protected_mode`，指的是我们的32位代码开始的地方。就像我们讨论过的，一个近的跳转，比如 `jmp start_protected_mode` 可能还不足以清空当前的流水线，而且，我们现在处于一种奇怪的状态，因为我们的当前代码段（比如 `cs`）在32位下是非法的。所以我们必须更新 `cs` 寄存器为 GDT 中的代码段描述符。段描述符每个8字节长，并且我们的代码描述符是 GDT 中的第二项（第一项是空描述符），所以它的偏移是 `0x8`，这就是我们要设置 `cs` 寄存器的值。注意，由于要跳到很远的地方执行，它会自动引起 CPU 更新 `cs` 寄存器为目标段的值。利用标签，我们可以让汇编器去计算这些段描述符偏移，然后将他们存为 `CODE_SEG` 和 `DATA_SEG` 常量。下面是相应代码：
+
+```
+jmp CODE_SEG:start_protected_mode
+
+[bits 32]
+start_protected_mode:
+
+...           ; By now we are assuredly in 32-bit protected mode. 
+...
+```
+
+注意，事实上，从实际开始跳和跳到的地方之间的距离的角度，我们不需要跳转到很远，重要的是我们如何跳转。
+
+也要注意，我们要使用 `[bits 32]` 指令告诉汇编器，从这里开始，它需要编码32位模式的指令。注意这并不意味着我们不能在16位模式下使用32位指令，只是说汇编器需要知道32位的情况，因为32位模式的指令和16位下编码有一点点不同。当切换到32位模式，我们使用32位寄存器 `eax` 来设置控制位。
+
+现在我们在32位模式下了。进入32位模式之后一件重要的要做的事是更新所有的其他段寄存器，（令它们指向我们32位的数据段而不是已经非法的16位段）并更新栈的位置。
+
+所有这些处理归结为如下代码：
+
+```
+[bits 16]
+; Switch to protected mode
+switch_to_pm:
+
+cli           ; We must switch of interrupts until we have 
+              ; set-up the protected mode interrupt vector
+              ; otherwise interrupts will run riot.
+
+lgdt [gdt_descriptor]   ; Load our global descriptor table, which defines
+                        ; the protected mode segments (e.g. for code and data)
+
+mov eax , cr0         ; To make the switch to protected mode, we set
+or eax, 0x1           ; the first bit of CR0, a control register
+mov cr0 , eax
+
+jmp CODE_SEG:init_pm  ; Make a far jump (i.e. to a new segment) to our  32-bit
+                      ; code. This also forces the CPU to flush its cache of
+                      ; pre-fetched and real-mode decoded instructions, which can 
+                      ; cause problems.
+
+[bits 32]
+; Initialise registers and the stack once in PM.
+init_pm:
+
+  mov ax, DATA_SEG    ; Now in PM , our old segments are meaningless ,
+  mov ds, ax          ; so we point our segment registers to the
+  mov ss, ax          ; data selector we defined in our GDT
+  mov es, ax 
+  mov fs, ax 
+  mov gs, ax
+
+  mov ebp, 0x90000    ; Update our stack position so it is right 
+                      ; at the top of the free space.
+  mov esp , ebp
+
+  call BEGIN_PM       ; Finally, call some well-known label
+```
+
+## 总结
+
+终于，我们可以把所有的例程包含到启动代码中了，并实现了16位到32位的切换。
+
+```
+; A boot sector that enters 32-bit protected mode. 
+[org 0x7c00]
+
+mov bp, 0x9000          ; Set the stack.
+mov sp, bp
+
+mov bx, MSG_REAL_MODE 
+call print_string
+
+call switch_to_pm       ; Note that we never return from here.
+
+jmp $
+
+%include "../print/print_string.asm" 
+%include "gdt.asm"
+%include "print_string_pm.asm" 
+%include "switch_to_pm.asm"
+
+[bits 32]
+
+; This is where we arrive after switching to and initialising protected mode.
+BEGIN_PM:
+
+mov ebx , MSG_PROT_MODE
+call print_string_pm      ; Use our 32-bit print routine.
+
+jmp $                     ; Hang.
+
+; Global variables
+MSG_REAL_MODE db "Started in 16-bit Real Mode", 0
+MSG_PROT_MODE db "Successfully landed in 32-bit Protected Mode", 0
+
+; Bootsector padding 
+times 510-($-$$) db 0 
+dw 0xaa55
+```
