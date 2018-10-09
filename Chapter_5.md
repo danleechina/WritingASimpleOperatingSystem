@@ -168,3 +168,196 @@ int callee_function(int my_arg) {
 
 首先，注意我们是如何区分不同函数的汇编代码：通过 `ret` 指令，它总是作为一个函数的最后一条指令出现。其次，注意上面的函数是如何使用汇编指令 `call` 的，这个指令我们知道是用于跳转到另一个例程，并期望从那个例程返回。这个指令一定是 `caller_function`，因为它在 0x14 的机器码偏移处调用 `callee_function`。最有意思的是 call 后面的几行代码，因为它们要保证参数 `my_arg` 被传给 `callee_function`。建立新的栈帧之后，就像前面的一样，`caller_function` 分配 8 字节在栈顶（`sub esp, byte +0x8`)，然后存放我们传过来的值，0xdede，到栈的空间中（`mov dword [esp], 0xdede`）。
 
+`callee_function` 是如何访问参数的呢？从偏移 `0x14`，我们看到 `callee_function` 创建了它的栈帧，不过注意 `eax` 寄存器中存储的内容（这个寄存器前面我们知道是用于保存函数返回值的）：它存放了地址 `[ebp + 0x8]` 的内容，再次提醒一下，栈是相对于内存反方向增长的，所以 `ebp + 0x8` 指的是在栈底下面的8字节，所以我们实际上访问了上一个栈帧的内容来得到参数的值。这是我们期望的结果，因为调用者将参数放到了它自己的栈帧的顶部，而我们将我们自己的栈帧建立在它们之上。
+
+理解高层语言编译器的调用约定对于理解它生成的汇编代码很有帮助。比如，C 默认的参数调用约定是将参数反向放在栈上，所以第一个参数在栈顶。搞乱了参数的次序很可能会导致程序执行错误，进而发生 crash。
+
+### 指针、地址和数据
+
+当使用高层语言，我们经常会忘了一个事实是：变量其实只是分配在内存地址中内容的引用而已，包含足够的空间来适应不同的数据类型。因为，我们处理变量的大部分情况，我们只是关心它们持有的值，而不是它们位于内存的哪里。考虑下面这样的 C 代码：
+
+```
+int a = 3;
+int b = 4;
+int total = a + b;
+```
+
+既然我们不知道编译器是如何处理这些 C 代码的，我们可以做一个常规的假设，`int a = 3;` 这个指令包含两部：第一，至少4字节（32位）将被保留（可能在栈上）用于存放值。然后，值`3` 将被存放到保留的地址处。第二行代码情况差不多。对于 `int total = a + b;`，更多的空间将被保留用于变量 `total`，并且将存放 a 和 b 的和的值。
+
+现在，假设我们想在内存的特定地址存放一个值。比如，像我们之前没法用 BIOS 然后用汇编写一个字符直接存放到图像内存的地址 `0xb8000` 中一样。我们如何用 C 来做呢（好像任何我们想要存的值的地址都是由编译器决定的）？事实上，在高级语言中是不允许我们这样做的，因为这几乎是违反了高级语言的抽象。幸运的是！C 允许我们使用指针变量（一种用于存放地址而不是值的数据类型），借此，我们可以读写数据到任何这个变量指向的地方。
+
+技术上，所有的指针变量是同一种数据类型（比如，32位的内存地址），不过通常我们希望读写指针指向的某一特定数据类型的数据。所以我们要告诉编译器，比如，这个指针是指向一个 char 类型的数据，然后那个是指向一个 int 类型的数据。这只是一种方便手段，因为这样我们就不需要总是告诉编译器它要读写指向内存地址的多少字节。定义和使用指针的语法如下：
+
+```
+// Here, the star following the type means that this is not a variable to hold 
+// a char (i.e. a single byte) but a pointer to the ADDRESS of a char,
+// which, being an address, will actually require the allocation of at least 
+// 32 bits.
+char* video_address = 0xb8000;
+
+// If we’d like to store a character at the address pointed to, we make the 
+// assignment with a star-prefixed pointer variable. This is known as
+// dereferencing a pointer, because we are not changing the address held by 
+// the pointer variable but the contents of that address.
+*video_address = ’X’;
+
+// Just to emphasise the purpose of the star, an ommision of it, such as:
+video_address = ’X’;
+// would erroneously store the ASCII code of ’X’ in the pointer variable, 
+// such that it may later be interpretted as an address.
+```
+
+在 C 代码中，我们经常看到 `char*` 变量用于字符串，让我们想想为什么。如果我们希望存放单一一个 int 或者 char，那么我们知道它们都是固定大小的数据类型（即，我们知道它们会使用多少字节），不过一个字符串通常是 char 的数组，这种数据类型的长度可以是任意一个长度。所以单一一个数据类型是没法存放完整的字符串的，只能存放它的一个元素。所以，我们可以使用指向 char 的指针，然后设置它为字符串中第一个字符的内存地址。这其实就是我们在之前的汇编代码中做的，比如 `print_string`，这个汇编中，我们在某个地方分配了一个字符串（“Hello, World”），然后为了打印一个字符串，我们通过 `bx` 寄存器传递字符地址。
+
+让我们看一个编译器为我们设置字符串变量的例子。在下面代码中，我们定义了一个简单的函数，只是分配了一个字符串给一个变量：
+
+```
+void my_function () {
+  char* my_string = "Hello";
+}
+```
+
+像前面一样，我们可以反汇编出下面这样的代码：
+
+```
+00000000 55               push ebp
+00000001 89E5             mov ebp,esp
+00000003 83EC10           sub esp,byte +0x10
+00000006 C745FA48656C6C   mov dword [ebp-0x6],0x6c6c6548
+0000000D 66C745FE6F00     mov word [ebp -0x2],0x6f
+00000013 C9               leave
+00000014 C3               ret
+```
+
+首先，看到 `ret` 指令。一般这表示一个函数的结束。可以看到前面两行指令设置了一个栈帧。下一个指令，我们以前也看到过，`sub esp,byte +0x10`，分配16字节在栈上，用于存放本地变量。再下一条指令，`mov dword [ebp-0x4],0xf`，应该很熟悉，因为它存放一个值到变量中。不过为什么它存放数字 `0xf`？我们没有告诉它这样做啊？存放这个之后，我们看到函数正常的将栈恢复（`leave`），然后返回（`ret`）。不过注意，还有5条更多的指令在函数的结尾后面！你觉得 `dec eax` 在做什么？可能它将 `eax` 中的值减少了1，为什么？然后其他指令又是什么意思？
+
+到这里，我们需要记住，反汇编器不会区分代码和数据。所以，代码的某处一定是我们定义的字符串的数据。我们知道我们的函数占据了代码的前半部分，因为这些汇编指令对我们来说很熟悉，并且也 `ret` 结尾。如果我们现在假设代码的其余部分实际上是我们的数据，那么可以的存放在我们的变量中的数字：`0xf`，就很清楚了。因为这是距离我们的代码开始处的数据起始的偏移：我们的指针变量正在被设置为数据的地址。如果我们查看 “Hello” 的 ASCII值，它们是 `0x48`、`0x65`、`0x6c`、`0x6c` 和`0x6f`。现在清楚了，因为看反汇编器输出的中间一栏（一些很奇怪的机器指令），我们看到最后一个字节是 `0x0`，这是 C 自动添加到字符串末尾的（像之前我们的汇编代码 `print_string` 一样，在处理阶段，我们可以容易的检测到我们是否已经到达一个字符串的末尾了）。
+
+## 执行内核代码
+
+理论已经够了，让我们启动和执行用 C 写的最简单的内核吧。这一步会用到所有我们学过的内容，并会加快开发我们自己的 OS 功能的进度。
+
+包含一下几步：
+
+- 编写内核代码，并编译
+- 编写启动代码
+- 创建一个内核镜像，包含启动代码和已经编译的内核代码
+- 加载内核代码到内存中
+- 切换到32位模式
+- 开始执行内核代码
+
+### 编写内核
+
+这一步不会花太多时间，因为，现在，我们内核的主要功能只是让我们知道它已经成功的加载和执行了。后面我们可以再完善内核，注意保持事情简单很重要。保存下面的代码在文件 `kernel.c` 中：
+
+```
+void main () {
+  // Create a pointer to a char, and point it to the first text cell of
+  // video memory (i.e. the top-left of the screen)
+  char* video_memory = (char*) 0xb8000;
+  // At the address pointed to by video_memory, store the character ’X’ 
+  // (i.e. display ’X’ in the top-left of the screen).
+  *video_memory = ’X’;
+}
+```
+
+用下列的命令编译成二进制文件：
+
+```
+$gcc -ffreestanding -c kernel.c -o kernel.o
+$ld -o kernel.bin -Ttext 0x1000 kernel.o --oformat binary
+```
+
+注意，现在我们告诉链接器一旦加载它到内存中，我们的代码将在 `0x1000` 处，所以它知道基于此纠正内部的偏移地址，就像我们使用 `[org 0x7c00]`（BIOS 会加载到 0x7c00 处然后开始执行）。
+
+### 创建启动代码加载内核
+
+现在我们看是写启动代码，它将会从磁盘加载内核并且执行内核代码。因为内核是用32位指令编译的，我们需要在执行内核代码之前，切换到32位模式。在计算机启动的时候，我们知道 BIOS 会加载我们的启动代码（磁盘的前面512字节），而不会加载我们的内核。不过前面的章节中我们已经知道如何使用 BIOS 磁盘例程来让我们的启动代码加载额外的磁盘扇区内容，并且我们也稍微了解到，当我们切换到32位模式以后，缺少 BIOS 的帮助，我们很难使用磁盘了：我们需要自己写一个软盘驱动或者硬盘驱动！！！
+
+为了简化从哪个磁盘的哪个扇区加载内核代码的问题，启动代码和 OS 的内核可以被放置到一起叫做内核镜像，可以将镜像写到启动磁盘的初始扇区中，这样启动代码将总是在内核镜像的最前面。一旦我们按这一小节的方式编译好了启动代码，我们可以用如下命令创建内核镜像：
+
+```
+cat boot_sect.bin kernel.bin > os-image
+```
+
+下面代码展示了如何在启动代码中加载内核： `os-image`
+
+```
+; A boot sector that boots a C kernel in 32-bit protected mode
+[org 0x7c00]
+KERNEL_OFFSET equ 0x1000  ; This is the memory offset to which we will load our kernel
+
+  mov [BOOT_DRIVE], dl    ; BIOS stores our boot drive in DL, so it’s
+                          ; best to remember this for later.
+
+  mov bp, 0x9000          ; Set-up the stack.
+  mov sp, bp
+
+  mov bx, MSG_REAL_MODE   ; Announce that we are starting
+  call print_string       ; booting from 16-bit real mode
+
+  call load_kernel        ; Load our kernel
+
+  call switch_to_pm       ; Switch to protected mode, from which
+                          ; we will not return
+
+  jmp $
+
+; Include our useful, hard-earned routines 
+%include "print/print_string.asm"
+%include "disk/disk_load.asm"
+%include "pm/gdt.asm"
+%include "pm/print_string_pm.asm" 
+%include "pm/switch_to_pm.asm"
+
+[bits 16]
+
+; load_kernel
+load_kernel:
+  mov bx, MSG_LOAD_KERNEL   ; Print a message to say we are loading the kernel
+  call print_string
+
+  mov bx, KERNEL_OFFSET     ; Set -up parameters for our disk_load routine , so
+  mov dh , 15               ; that we load the first 15 sectors (excluding
+  mov dl, [BOOT_DRIVE]      ; the boot sector) from the boot disk (i.e. our
+  call disk_load            ; kernel code) to address KERNEL_OFFSET
+
+  ret
+
+[bits 32]
+; This is where we arrive after switching to and initialising protected mode.
+
+BEGIN_PM:
+mov ebx, MSG_PROT_MODE      ; Use our 32-bit print routine to
+call print_string_pm        ; announce we are in protected mode
+
+call KERNEL_OFFSET          ; Now jump to the address of our loaded
+                            ; kernel code , assume the brace position ,
+                            ; and cross your fingers. Here we go!
+
+jmp $                       ; Hang.
+
+; Global variables
+BOOT_DRIVE      db 0
+MSG_REAL_MODE   db "Started in 16-bit Real Mode", 0
+MSG_PROT_MODE   db "Successfully landed in 32-bit Protected Mode", 0
+MSG_LOAD_KERNEL db "Loading kernel into memory.", 0
+
+; Bootsector padding 
+times 510-($-$$) db 0 
+dw 0xaa55
+```
+
+在运行 Bochs 命令之前，确保 Bochs 配置文件有启动磁盘设置到你的内核镜像文件中：
+
+```
+floppya: 1_44=os-image, status=inserted 
+boot: a
+```
+
+你可能会问，为什么我们从启动磁盘中加载15个段（512*15字节），毕竟我们的内核镜像实际上只有1个扇区不到的大小，所以加载1个扇区就够了？原因是读取额外的磁盘扇区并没有什么坏处，即使它们没有被初始化为任何数据，不过在后面，当尝试检测到我们没有读取足够的扇区时，这可能会有害（并增加了内存占用大小）：此时，计算机会没有任何警告的停下来，可能在读取的半途中失败。
+
+如果一个 ‘X’ 在屏幕的左上脚打印了的话，那么恭喜你成功了！虽然看起来没有什么，但是这是我们开始之前的一大步：我们现在已经能启动到高级语言写的代码了，可以考虑更少的汇编编程，能够专注于如何编写我们的 OS，而且当然，再学一点 C 的内容。这是学习 C 的最佳方式，因为 Java 和其他脚本语言（比如 Python、PHP 等）是高级语言的更大抽象。
+
+### 内核编程
+
