@@ -361,3 +361,202 @@ boot: a
 
 ### 内核编程
 
+以一个简单的内核开始是一个好主意，不过这样我们忽略了一个潜在的问题：当我们启动内核，跳转到内核的所在地址，然后开始执行内核代码的第一条指令，但是前面章节看到 C 编译器是如何决定在输出的文件中放置代码和数据的。因为我们的内核有一个简单的函数，基于我们前面对于编译器是如何生成机器代码的观察，我们可能假设第一条机器码指令是内核入口函数的第一条指令 `main`，不过，假设我们的内核代码看起来这样：
+
+```
+void some_function() { 
+}
+
+void main () {
+  char* video_memory = 0xb8000; 
+  *video_memory = ’X’;
+  // Call some function 
+  some_function();
+}
+```
+
+现在，编译器可能会执行 `some_function` 入口函数的指令而不是 `main` 函数的指令，因为我们的代码会从第一行指令开始盲目的执行。它将会碰到在 `some_function` 中的第一个 `ret` 指令，然后会回到启动代码而不会进入到 `main` 函数。这里的问题是，进入到内核的准确的问题太依赖于在源代码中元素（比如函数）的次序，以及编译器和链接器太过盲目，所以我们要让它更加的鲁棒。
+
+大部分 OS 用来进入到内核准确位置的方法是写一个简单的汇编例程，它会总是附着在内核机器码的前面，它的唯一目的就是调用内核中的入口函数。使用汇编的原因是因为我们知道它是如何被转换为机器码的，然后我们再保证内核的入口函数的第一条指令将能调用执行。
+
+这其实是关于链接器如何工作的一个好例子（我们目前为止还没有详细介绍过链接器）。链接器把目标文件作为输入，然后将它们合并在一起，并将任何标签重新设置准确的地址。比如，如果一个目标文件有一部分代码调用了函数 `some_function`（被定义再另一个目标文件中），然后在目标文件们的代码完成链接并被输出到一个文件中，标签 :code:'some_function' 将被重新定位为组合了的代码中的偏移地址。
+
+下面展示了一个简单的汇编例程用来进入到内核的入口函数：
+
+```
+; Ensures that we jump straight into the kernel’s entry function.
+[bits 32] ; We’re in protected mode by now, so use 32-bit instructions.
+[extern main] ; Declate that we will be referencing the external symbol ’main’,
+              ; so the linker can substitute the final address
+
+call main ; invoke main() in our C kernel
+jmp $ ; Hang forever when we return from the kernel
+```
+
+我们可以从 `call main` 这一行看到代码只是简单的调用一个名字叫 `main` 的函数。不过 `main` 并不存在在这个代码里，因为它被期望存在于某一个目标文件中，然后在链接的时候，它会被重新计算偏移地址。这个期望是在这个文件的最前面一行指令 `[extern main]` 中指明的，如果在链接的时候找不到这个标签，链接器会失败。
+
+前面我们已经将汇编转换成原生的二进制格式，因为我们希望以启动代码的方法在 CPU 上运行。不过这里的代码不是孤立，因为要解决标签 `main` 的引用，所以我们可以用下列方式将其编译为目标文件，并保留它要需要解决的标签的元信息：
+
+```
+$nasm kernel entry.asm -f elf -o kernel entry.o
+```
+
+选项 `-f elf` 告诉汇编器输出一个特定格式的文件 ELF （可执行并可链接格式），它是我们 C 编译器的默认输出格式。
+
+现在我们用下列方式将其链接为 `kernel_entry.o` （而不是简单将它和 `kernel.o` 链接为 `kernel.bin` 文件）：
+
+```
+$ld -o kernel.bin -Ttext 0x1000 kernel entry.o kernel.o --oformat binary
+```
+
+链接器会遵循命令中文件的次序，这样前面的命令会保证 `kernel_entry.o` 先于 `kernel.o` 被链接。
+
+像以前一样，我们可以重构一个内核镜像，用下面的方式：
+
+```
+cat boot sect.bin kernel.bin > os-image
+```
+
+现在我们可以用 Bochs 测试它了，并且我们的启动块会找到内核的准确入口。
+
+## 使用 Make 构建
+
+现在，你应该重复使用了很多命令，每次一改一行代码，为了得到正确的结果或者测试一个新的想法你需要重试。以前的程序员也碰到过这些问题，并且开发了大量的工具用于自动构建软件。这里我们会考虑使用 `make`，它是许多构建工具的前身，并被用于许多操作系统和其应用的构建，比如 Linux 和 Minix。`make` 的基本原理是指定一个配置文件（通常叫做 `Makefile`），描述如何使用一个文件生成另一个文件，生成的文件可能被描述依赖于一个或多个其他的文件。比如，我们可以写一个下列规则的 Makefile，告诉 `make` 如何将 C 文件编译为一个目标文件：
+
+```
+kernel.o : kernel.c
+  gcc -ffreestanding -c kernel.c -o kernel.o
+```
+
+这里的美妙在于，在和 Makefile 同一个目录下，我们现在执行下面命令：
+
+```
+$make kernel.o
+```
+
+当 `kernel.o` 文件不存在或者 `kernel.c` 被更新了，它将重新编译 C 源码文件。不过只有当我们添加了很多独立的规则，我们才会看到 `make` 是如何帮助我们节约时间和不必要的命令执行。
+
+```
+# Build the kernel binary
+kernel.bin: kernel_entry.o kernel.o
+  ld -o kernel.bin -Ttext 0x1000 kernel_entry.o kernel.o --oformat binary
+
+# Build the kernel object file
+kernel.o : kernel.c
+  gcc -ffreestanding -c kernel.c -o kernel.o
+
+# Build the kernel entry object file.
+kernel_entry.o : kernel_entry.asm
+  nasm kernel_entry.asm -f elf -o kernel_entry.o
+```
+
+按照上面的 Makefile 文件运行 `make kernel.bin` 命令，`make` 会知道，在它能运行命令生成 `kernel.bin` 之前，它必须从源文件 `kernel.c` 和 `kernel_entry.asm` 中构建它的两个依赖，`kernel.o` 和 `kernel_entry.o`。将会导致下面这些命令被执行：
+
+```
+nasm kernel entry.asm -f elf -o kernel entry.o
+gcc -ffreestanding -c kernel.c -o kernel.o
+ld -o kernel.bin -Ttext 0x1000 kernel entry.o kernel.o --oformat binary
+```
+
+最后，如果我们再次运行 `make` 的话，我们会发现 make 报告说构建目标 `kernel.bin` 已经是最新的了。然而，如果我们修改了文件，比如，`kernel.c` 文件，保存，然后在运行 `make kernel.bin` 我们会发现只有需要的命令才会被 `make` 执行，如下：
+
+```
+gcc -ffreestanding -c kernel.c -o kernel.o
+ld -o kernel.bin -Ttext 0x1000 kernel entry.o kernel.o --oformat binary
+```
+
+为了减少重复，提高 makefile 的可维护性，我们可以使用特殊的 makefile 变量 `$<`、`$@` 和 `$^`，如下所示：
+
+```
+# $^ is substituted with all of the target’s dependancy files
+kernel.bin: kernel_entry.o kernel.o
+  ld -o kernel.bin -Ttext 0x1000 $^ --oformat binary
+
+# $< is the first dependancy and $@ is the target file
+kernel.o : kernel.c
+  gcc -ffreestanding -c $< -o $@
+
+# Same as the above rule.
+kernel_entry.o : kernel_entry.asm 
+  nasm $< -f elf -o $@
+```
+
+通常指定一个不会实际生成文件的目标是很有用的。一个常见的使用是创建一个 `clean` 目标，这样当我们运行 `make clean` 的时候，所有生成的文件将从目录从删除掉，只保留源文件，如下所示：
+
+```
+clean:
+  rm *.bin *.o
+```
+
+用这种方式清理目录会有用，如果你只想和你的朋友分享源文件的话。将这个目录放置在版本控制之下（比如 Git），当你做了改动，你可以准确的重新构建出所有目标产物。
+
+如果运行 `make` 没有带一个目标，那么在 makefile 文件中的第一个目标将被认为是默认的。所以你可能经常会在 makefile 的头部看到名为 `all` 的构建目标，如下所示：
+
+```
+# Default make target.
+all: kernel.bin
+
+# $^ is substituted with all of the target’s dependancy files
+kernel.bin: kernel_entry.o kernel.o
+  ld -o kernel.bin -Ttext 0x1000 $^ --oformat binary
+
+# $< is the first dependancy and $@ is the target file
+kernel.o : kernel.c
+  gcc -ffreestanding -c $< -o $@
+
+# Same as the above rule.
+kernel_entry.o : kernel_entry.asm 
+  nasm $< -f elf -o $@
+```
+
+注意，当指定 `kernel.bin` 为 `all` 构建目标的依赖时，我们保证 `kernel.bin` 和它所有的依赖会被构建。
+
+现在我们可以将所有的用于构建内核和可加载镜像的命令放到一个 makefile 文件中，如下所示：
+
+```
+all: os-image
+
+# Run bochs to simulate booting of our code.
+run: all
+  bochs
+
+# This is the actual disk image that the computer loads,
+# which is the combination of our compiled bootsector and kernel 
+os-image: boot_sect.bin kernel.bin
+  cat $^ > os-image
+
+# This builds the binary of our kernel from two object files: 
+# - the kernel_entry, which jumps to main() in our kernel
+# - the compiled C kernel
+kernel.bin: kernel_entry.o kernel.o
+  ld -o kernel.bin -Ttext 0x1000 $^ --oformat binary
+
+# Build our kernel object file.
+kernel.o : kernel.c
+  gcc -ffreestanding -c $< -o $@
+
+# Build our kernel entry object file.
+kernel_entry.o : kernel_entry.asm 
+  nasm $< -f elf -o $@
+
+# Assemble the boot sector to raw machine code
+# The -I options tells nasm where to find our useful assembly 
+# routines that we include in boot_sect.asm
+boot_sect.bin : boot_sect.asm
+  nasm $< -f bin -I ’../../16bit/’ -o $@
+
+
+# Clear away all generated files.
+clean:
+  rm -fr *.bin *.dis *.o os-image *.map
+
+
+# Disassemble our kernel - might be useful for debugging.
+kernel.dis : kernel.bin 
+  ndisasm -b 32 $< > $@
+```
+
+后面，我们通过简单的执行 `make run`，就可以在 Bochs 中测试代码的改动。
+
+### 管理我们 OS 的代码
+
