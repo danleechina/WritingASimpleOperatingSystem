@@ -560,3 +560,208 @@ kernel.dis : kernel.bin
 
 ### 管理我们 OS 的代码
 
+我们已经完成了一个很简单的 C 内核，在屏幕的角落打印了一个 X。这个内核是被编译成32位指令，并且被 CPU 成功的执行。不过我们要提前做一些别的工作。我们需要给我们的代码建立一个合适的结构，同时我们每添加一些包含新功能的源文件到 OS 中的时候允许我们很容易的更改 makefile 文件。并且用模拟器比如 Bochs 检查这些功能。
+
+和 Linux 和 Minix 内核很像，我们可以将我们的代码组织成下面这样的目录：
+
+- `boot`：任何和启动以及启动扇区有关的放在这里，比如 `boot_sect.asm` 和其他一些汇编例程（比如 `print_string.asm`、`gdt.asm`、`switch_to_pm.asm` 等）
+- `kernel`：内核的主文件，`kernel.c`，以及其他内核相关代码，又不和设备驱动有关的放在这里
+- `drivers`：任何硬件相关的驱动代码放在这里
+
+现在，在我们的 makefile 文件中，除了指定每一个我们想要构建的目标文件（比如： `kernel/kernel.o`、`drivers/screen.o`、`drivers/keyboard.o` 等），我们可以使用一个特殊的通配符：
+
+```
+# Automatically expand to a list of existing files that 
+# match the patterns
+C_SOURCES = $(wildcard kernel/*.c drivers/*.c)
+```
+
+然后使用其他的 make 方式，我们可以将源文件名字转换成目标文件名字：
+
+```
+# Create a list of object files to build, simple by replacing 
+# the ’.c’ extension of filenames in C_SOURCES with ’.o’
+OBJ = ${C_SOURCES:.c=.o}
+```
+
+现在我们可以将内核的目标文件链接起来，来构建内核二进制文件：
+
+```
+# Link kernel object files into one binary, making sure the 
+# entry code is right at the start of the binary.
+kernel.bin: kernel/kernel_entry.o ${OBJ}
+  ld -o $@ -Ttext 0x1000 $^ --oformat binary
+```
+
+make 有一个功能会遍历每一个动态生成的目标文件叫做"模式规则"，告诉 make 如何从一个文件构建另一个文件类型，基于一个简单文件名模式匹配：
+
+```
+# Generic rule for building ’somefile.o’ from ’somefile.c’
+%.o : %.c
+  gcc -ffreestanding -c $< -o $@
+```
+
+一个等价的但更繁琐的方式是下面这样：
+
+```
+kernel/kernel.o : kernel/kernel.c
+  gcc -ffreestanding -c $< -o $@
+
+drivers/screen.o : drivers/screen.c 
+  gcc -ffreestanding -c $< -o $@
+
+drivers/keyboard.o : drivers/keyboard.c 
+  gcc -ffreestanding -c $< -o $@
+
+...
+```
+
+很好！现在我们对 make 了解的足够多了，我们可以开始开发我们的内核了，并且不需要一遍又一遍的重新打很多命令，来确认是否工作正常。下面是一个完整的 makefile 文件，用于我们后面的内核开发构建：
+
+```
+# Automatically generate lists of sources using wildcards. 
+C_SOURCES = $(wildcard kernel/*.c drivers/*.c)
+HEADERS = $(wildcard kernel/*.h drivers/*.h)
+
+# TODO: Make sources dep on all header files.
+
+# Convert the *.c filenames to *.o to give a list of object files to build
+OBJ = ${C_SOURCES:.c=.o}
+
+# Defaul build target
+all: os-image
+
+# Run bochs to simulate booting of our code.
+run: all 
+  bochs
+
+# This is the actual disk image that the computer loads
+# which is the combination of our compiled bootsector and kernel 
+os-image: boot/boot_sect.bin kernel.bin
+  cat $^ > os-image
+
+# This builds the binary of our kernel from two object files: 
+# - the kernel_entry, which jumps to main() in our kernel
+# - the compiled C kernel
+kernel.bin: kernel/kernel_entry.o ${OBJ}
+  ld -o $@ -Ttext 0x1000 $^ --oformat binary
+
+# Generic rule for compiling C code to an object file
+# For simplicity, we C files depend on all header files. 
+%.o : %.c ${HEADERS}
+  gcc -ffreestanding -c $< -o $@
+
+# Assemble the kernel_entry.
+%.o : %.asm
+  nasm $< -f elf -o $@
+
+%. bin : %. asm
+  nasm $< -f bin -I ’../../16bit/’ -o $@
+
+clean:
+  rm -fr *.bin *.dis *.o os-image
+  rm -fr kernel/*.o boot/*.bin drivers/*.o
+```
+
+## C 入门
+
+C 有一些对于新手来说奇怪的地方。
+
+### 预处理指令
+
+在一个 C 文件被编译成一个目标文件之前，预处理器会扫描预处理的指令和变量，然后将它们替换为代码，比如宏和常量的值，或者什么都不替换。预处理对于编译 C 代码不是很关键，不过给我们提供了一些管理代码的便利。
+
+```
+#define PI 3.141592
+...
+float radius = 3.0;
+float circumference = 2 * radius * PI; 
+...
+```
+
+预处理会在编译之前输出下面的代码：
+
+```
+...
+float radius = 3.0;
+float circumference = 2 * radius * 3.141592; 
+...
+```
+
+预处理对于输出条件代码也很有用，不过这些条件代码不是指在运行时作出的条件，比如 if 语句，而是在编译时期的条件代码。比如为了包含或者排除测试代码，考虑下面这样的预处理指令的使用：
+
+```
+...
+#ifdef DEBUG
+print("Some debug message\n"); #endif
+...
+```
+
+现在，如果预处理变量 `DEBUG` 已经被定义的话，那么这样的测试代码会被包含，没有定义的话，则没有这些测试代码。一个变量可能在编译 C 文件的命令行中被定义：
+
+```
+$gcc -DDEBUG -c some file.c -o some file.o
+```
+
+这样的命令行变量描述通常用于应用编译时期的配置，特别是 OS，可能会包含或者排除整个的代码，尤其是在嵌入式设备上降低内核的内存占用。
+
+### 函数定义和头文件
+
+当编译器遇到一个函数调用，可能在被编译的文件里面被定义或者没有被定义，它可能错误的生成不正确的机器代码如果它不知道函数的返回值和参数类型的话。回忆前面的章节，编译器必须在栈为函数准备一些变量，但是如果当前的栈不是函数期望的话，那么栈可能崩溃。出于这种原因，如果没有完整的函数定义的话，至少在使用函数之前有一个函数接口的声明很重要。这种声明也被叫做函数的原型。
+
+```
+int add(int a, int b) { 
+  return a + b;
+}
+void main () {
+
+  // This is okay, because our compiler has seen the full
+  // definition of add. 
+  int result = add(5, 3);
+
+  // This is not okay, since compiler does not know the return
+  // type or anything about the arguments. 
+  result = divide(34.3, 12.76);
+
+  // This is not okay, because our compiler knows nothing about
+  // this function’s interface.
+  int output = external_function(5, "Hello", 4.5); 
+}
+
+float divide(float a, float b) { 
+  return a / b;
+}
+```
+
+可以用如下的方式修复：
+
+```
+// These function prototypes inform the compiler about
+// the function interfaces.
+float divide(float a, float b); // <-- note the semi-colon 
+int external_function(int a, char* message, float b);
+
+int add(int a, int b) { 
+  return a + b;
+}
+
+void main () {
+  // This is okay, because our compiler has seen the full
+  // definition of add. 
+  int result = add(5, 3);
+
+  // This is okay now: compiler knows the interface.
+  result = divide(34.3, 12.76);
+
+  // This is okay now: compiler knows the interface.
+  int output = external_function(5, "Hello", 4.5); 
+}
+
+float divide(float a, float b) { 
+  return a / b;
+}
+```
+
+现在，既然一些函数会被其他目标文件中的代码调用，它们也会需要声明这些函数的原型，这会导致很多重复的声明，从而很难维护。出于这个原因，很多 C 程序使用 `#include` 预处理指令来插入编译之前需要的包含这些函数声明的公共的代码。这些公共代码被叫做头文件，我们可以认为是编译了的目标文件的接口。
+
+有时候一个头文件会包含另一个，所以不要重复包含同样的头文件很重要。
