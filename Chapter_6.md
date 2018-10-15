@@ -81,3 +81,226 @@ DMA 的一个好的比喻是，一个建筑师想要将一堵墙从一个地方�
 
 目前我们的内核支持在屏幕的角落打印字符 ‘X’。这足够我们知道我们的内核是否已经被成功的加载或者执行，不过并没有告诉我们更多别的信息。
 
+我们知道通过向显示缓存地址 0xb8000 的内部写入字符即可在屏幕上展示出来，不过我们不想在内核开发的时候一直考虑这些底层的事情。如果我们可以创建一个屏幕抽象层允许我们写 `print("Hello")` 或者 `clear_screen()`这样的代码的话会很不错。如果在一行无法容纳要打印的字符的时候能够滚动到下一行，这样就更好了！这种抽象不仅能让展示内核执行信息的打印变得容易，而且也允许我们以后很容易的用另外一个显示驱动来替换当前的（可能当前的计算机不支持我们当前使用的 VGA 的文字模式）。
+
+### 理解显示设备
+
+与其他硬件比起来，显示设备相当的直接。因为作为内存映射的设备，我们不需要理解任何和控制信息以及硬件 I/O 相关的内容。不过，一个有用的需要 I/O 控制来操作（也就是通过 I/O 端口）的屏幕设备是光标。这对用户很有用，因为它可以引起用户的注意，提醒他们输入一些文本。并且我们也会使用它来作为内部的标记，不管光标是否可以见，程序员不需要总是为在屏幕上打印字符串设置特定的坐标。比如，如果我们写 `print("hello")`，每一个字符都会被打印到屏幕上的特定地方。
+
+### 基本显示驱动实现
+
+虽然我们可以在 `kernel.c`（它包含一个内核的入口函数， `main()`） 中完成所有代码，但是将这些有特定功能的代码组织到它自己的文件会更好，然后这些可以被编译和链接到我们的内核代码，最终效果和将所有代码放到一个文件中是一样的。让我们在 `drivers` 中新建一个新的驱动实现文件 `screen.c`，和一个驱动接口文件 `screen.h`。由于在 makefile 中使用了通配符，`screen.c`（同一目录下的其他 C 文件也一样） 会被自动编译链接到内核中。
+
+首先，让我们在 `screen.h` 定义下列的常量，可以加强我们的代码的可读性：
+
+```
+#define VIDEO_ADDRESS 0xb8000
+#define MAX_ROWS 25
+#define MAX_COLS 80
+
+// Attribute byte for our default colour scheme. 
+#define WHITE_ON_BLACK 0x0f
+
+// Screen device I/O ports 
+#define REG_SCREEN_CTRL 0x3D4 
+#define REG_SCREEN_DATA 0x3D5
+```
+
+然后，思考我们将如何写一个函数 `print_char(...)`，将一个字符展示在屏幕的特定的行和列中。我们会在驱动内部使用这个函数（也就是是私有的），我们驱动的公开接口函数（也就是我们希望外部代码使用的函数）会基于此来实现。我们知道视频内存只是一个简单的内存特定范围地址，在这里，每一个字符单元用两个字节表示，第一个字节是字符的 ASCII 值，第二个字节是字符属性的值，允许我们设置每个字符单元的不同的颜色模式。下面代码展示了我们是如何定义这么一个函数的：使用了另外一些我们将要定义的函数（`get_cursor()`、`set_cursor()`、`get_screen_offset()` 以及 `handle_scrolling()`）。
+
+```
+/* Print a char on the screen at col, row, or at cursor position */
+void print_char(char character, int col, int row, char attribute_byte) {
+  /* Create a byte (char) pointer to the start of video memory */ 
+  unsigned char *vidmem = (unsigned char *) VIDEO_ADDRESS;
+
+  /* If attribute byte is zero, assume the default style. */ 
+  if (!attribute_byte) {
+    attribute_byte = WHITE_ON_BLACK; 
+  }
+
+  /* Get the video memory offset for the screen location */ 
+  int offset;
+  /* If col and row are non-negative, use them for offset. */ 
+  if (col >= 0 && row >= 0) {
+    offset = get_screen_offset(col, row);
+  /* Otherwise, use the current cursor position. */ 
+  } else {
+    offset = get_cursor (); 
+  }
+  
+  // If we see a newline character, set offset to the end of 
+  // current row, so it will be advanced to the first col
+  // of the next row.
+  if (character == ’\n’) {
+    int rows = offset / (2* MAX_COLS );
+    offset = get_screen_offset(79, rows);
+    // Otherwise, write the character and its attribute byte to 
+    // video memory at our calculated offset.
+  } else {
+    vidmem[offset] = character;
+    vidmem[offset+1] = attribute_byte; 
+  }
+
+  // Update the offset to the next character cell, which is 
+  // two bytes ahead of the current cell.
+  offset += 2;
+  // Make scrolling adjustment, for when we reach the bottom 
+  // of the screen.
+  offset = handle_scrolling(offset);
+  // Update the cursor position on the screen device.
+  set_cursor(offset); 
+}
+```
+
+先实现这些函数中最简单的函数：`get_screen_offset`。这个函数会将行列坐标转换成展示字符单元的距离视频内存开始处的偏移地址。这个转换很简单，注意每一个单元占2个字节。比如，我想要在行3和列4的位置设置一个展示字符，那么这个字符单元会在距离视频内存偏移 488 处（(3 * 80 (i.e. the the row width) + 4) * 2 = 488）。所以 `get_screen_offset` 函数看起来这样：
+
+```
+// This is similar to get_cursor, only now we write 
+// bytes to those internal device registers. 
+port_byte_out(REG_SCREEN_CTRL , 14);
+port_byte_out(REG_SCREEN_DATA , (unsigned char)(offset >> 8));
+port_byte_out(REG_SCREEN_CTRL , 15);
+```
+
+现在看看光标控制函数，`get_cursor()` 和 `set_cursor()`，这两个函数会通过 I/O 端口设置显示控制器的寄存器。使用特定的视频设备 I/O 端口来读写它内部光标相关的寄存器，下面是显示：
+
+```
+void set_cursor(int offset) {
+  offset /= 2; 
+  // Convert from cell offset to char offset. 
+  // This is similar to get_cursor, only now we write
+  // bytes to those internal device registers.
+  cursor_offset -= 2*MAX_COLS;
+
+  // Return the updated cursor position.
+  return cursor_offset; 
+}
+
+int get_cursor () {
+
+  // The device uses its control register as an index 
+  // to select its internal registers, of which we are 
+  // interested in:
+  // reg 14: which is the high byte of the cursor's offset
+  // reg 15: which is the low byte of the cursor's offset
+  // Once the internal register has been selected, we may read or
+  // write a byte on the data register.
+
+  port_byte_out(REG_SCREEN_CTRL , 14);
+  int offset = port_byte_in(REG_SCREEN_DATA) << 8; 
+  port_byte_out(REG_SCREEN_CTRL , 15);
+  offset += port_byte_in(REG_SCREEN_DATA);
+  // Since the cursor offset reported by the VGA hardware is the 
+  // number of characters, we multiply by two to convert it to 
+  // a character cell offset.
+  return offset *2;
+}
+```
+
+现在，我们有一个函数允许我们在屏幕的特定位置打印一个字符，并且这个函数封装了所以硬件相关的细节。通常，我们不会想在屏幕上一个个打印字符，而是一整条字符串，所以让我们创建一个友好的函数，`print_at(...)`，这个函数会带一个指向字符串第一个字符的指针（即 `char *`），然后一个接一个的打印每一个字符。如果传给函数的坐标是 `(-1, -1)` ，那么它会从当前的光标位置开始打印。代码如下：
+
+```
+void print_at(char* message, int col, int row) {
+  // Update the cursor if col and row not negative. 
+  if (col >= 0 && row >= 0) {
+    set_cursor(get_screen_offset(col, row)); 
+  }
+
+  // Loop through each char of the message and print it. 
+  int i = 0;
+  while(message[i] != 0) {
+  print_char(message[i++], col, row, WHITE_ON_BLACK); 
+  }
+}
+```
+
+简单起见，为了避免老是使用 `print_at("hello", -1, -1)`，可以定义一个函数 `print`，代码如下所示：
+
+```
+void print(char* message) {
+  print_at(message , -1, -1);
+}
+```
+
+另一个有用的简单函数是 `clear_screen(...)`，它会通过在每一个位置写一个空白字符来清理屏幕。代码如下：
+
+```
+void clear_screen () { 
+  int row = 0;
+  int col = 0;
+
+  /* Loop through video memory and write blank characters. */ 
+  for (row=0; row<MAX_ROWS; row++) {
+    for (col=0; col<MAX_COLS; col++) { 
+      print_char(’ ’, col, row, WHITE_ON_BLACK);
+    } 
+  }
+
+  // Move the cursor back to the top left.
+  set_cursor(get_screen_offset(0, 0)); 
+}
+```
+
+### 滚动屏幕
+
+如果你希望在光标到达屏幕底部的时候自动滚动屏幕，你要记住你必须自己实现这个。这个通常会被忘记，因为屏幕滚动是很自然的，以至于我们以为是理所当然的。不过在底层，我们有对硬件的完全控制，所以我们必须自己实现这个功能。
+
+为了在到底部的时候，让屏幕看上去滚动，我们必须将每一个字符单元向上移动一行，然后清理最后一行，用于新的一行输入（即本来将要被写到屏幕外的那一行）。这意味着，顶部的一行将被第二行覆盖，所以顶部的一行将永远的丢失了，不过我们并不关心这个，因为我们目标是让用户看到计算机最近的活跃信息。
+
+一个不错的想法来实现滚动是在增加光标的位置 `print_char` 之后立即调用一个函数，这个函数我们定义它为 `handle_scrolling`。 `handle_scrolling` 主要用于保证当光标的视频内存偏移被增加到超出屏幕最后一行的时候，所有的行都会向上移动，然后光标被重新定位于最后一个可见的行（也就是新的一行）。
+
+移动一行等价于拷贝它的所有字节（2字节的字符单元，一行80个单元），到上一行的地址处。对此，增加一个通用目的的函数 `memory_copy` 会很有用。因为这个函数很有可能在其他地方也会被用到，所以我们把它加到文件 `kernel/util.c` 中。`memory_copy` 函数会携带源地址和目的地址，以及需要拷贝的字节数，然后循环的一行行拷贝，代码如下：
+
+```
+/* Copy bytes from one place to another. */
+void memory_copy(char* source, char* dest, int no_bytes) {
+  int i;
+  for (i=0; i<no_bytes; i++) {
+    *(dest + i) = *(source + i); 
+    }
+  }
+```
+
+使用 `memory_copy` 函数的代码如下：
+
+```
+/* Advance the text cursor, scrolling the video buffer if necessary. */ 
+int handle_scrolling(int cursor_offset) {
+
+  // If the cursor is within the screen, return it unmodified. 
+  if (cursor_offset < MAX_ROWS*MAX_COLS*2) {
+    return cursor_offset; 
+  }
+
+  /* Shuffle the rows back one. */ 
+  int i;
+  for (i=1; i<MAX_ROWS; i++) {
+    memory_copy(get_screen_offset(0,i) + VIDEO_ADDRESS,
+                get_screen_offset(0,i-1) + VIDEO_ADDRESS,
+                MAX_COLS *2);
+  }
+
+  /* Blank the last line by setting all bytes to 0 */
+  char* last_line = get_screen_offset(0,MAX_ROWS -1) + VIDEO_ADDRESS; 
+  for (i=0; i < MAX_COLS*2; i++) {
+    last_line[i] = 0;
+  }
+
+  // Move the offset back one row, such that it is now on the last 
+  // row, rather than off the edge of the screen.
+  cursor_offset -= 2*MAX_COLS;
+
+  // Return the updated cursor position.
+  return cursor_offset; 
+}
+```
+
+## 处理中断
+
+## 键盘驱动
+
+## 硬盘驱动
+
+## 文件系统
+
