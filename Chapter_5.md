@@ -1,3 +1,5 @@
+>原文地址 [Writing a Simple Operating System — from Scratch](http://www.cs.bham.ac.uk/~exr/lectures/opsys/10_11/lectures/os-dev.pdf)
+
 # 内核之旅
 
 目前为止，通过使用底层的汇编语言，我们知道了很多计算机是如何工作的知识，不过我们也知道了使用这种语言是多么的低效：我们甚至需要仔细思考最简单的控制流结构，并且我们要关系如何最大限度的使用有限数量的寄存器，然后在栈中挣扎。汇编的另一个缺点是与特定架构的 CPU 绑定太过密切，导致让我们的 OS 在其他 CPU 架构上（比如 ARM、RISC、PowerPC）很难运行起来。

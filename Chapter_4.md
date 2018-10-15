@@ -1,3 +1,5 @@
+>原文地址 [Writing a Simple Operating System — from Scratch](http://www.cs.bham.ac.uk/~exr/lectures/opsys/10_11/lectures/os-dev.pdf)
+
 # 32位保护模式
 
 继续16位模式可以加深我们的之前学到的内容，这很好，不过，为了充分发挥 CPU 的作用，为了更好理解现代计算机是如何从 CPU 的发展中受益的（主要是硬件级别的内存保护），我们必须要学习 32 位保护模式。

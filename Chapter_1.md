@@ -1,3 +1,5 @@
+>原文地址 [Writing a Simple Operating System — from Scratch](http://www.cs.bham.ac.uk/~exr/lectures/opsys/10_11/lectures/os-dev.pdf)
+
 ## 前言
 
 我们之前都使用过操作系统（以下简称 OS）（例如 Windows XP，Linux等），甚至我们可以为其中的某个 OS 写过程序。但 OS 到底是干嘛用的呢？我们所看到的有哪些是硬件处理的，哪些是软件处理的？以及计算机到底如何工作的？

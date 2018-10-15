@@ -1,3 +1,5 @@
+>原文地址 [Writing a Simple Operating System — from Scratch](http://www.cs.bham.ac.uk/~exr/lectures/opsys/10_11/lectures/os-dev.pdf)
+
 # 设备驱动和文件系统
 
 ## 硬件输入输出
